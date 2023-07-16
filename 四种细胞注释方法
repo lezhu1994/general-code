@@ -1,0 +1,261 @@
+if(T){rm(list = ls())
+  if (!require("Seurat"))install.packages("Seurat")
+  if (!require("BiocManager", quietly = TRUE))install.packages("BiocManager")
+  if (!require("multtest", quietly = TRUE))install.packages("multtest")
+  if (!require("dplyr", quietly = TRUE))install.packages("dplyr")
+  download.file('https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz','pbmc3k_filtered_gene_bc_matrices.tar.gz')
+  library(R.utils)
+  gunzip('pbmc3k_filtered_gene_bc_matrices.tar.gz')
+  untar('pbmc3k_filtered_gene_bc_matrices.tar')
+  pbmc.data <- Read10X('filtered_gene_bc_matrices/hg19/') ##该目录下有注释信息可以将10*的数据导入数据框
+  pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+  pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-") 
+  pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)   
+  pbmc <- NormalizeData(pbmc, normalization.method = "LogNormalize", scale.factor = 10000)      
+  pbmc <- FindVariableFeatures(pbmc, selection.method = "vst", nfeatures = 2000)
+  top10 <- head(VariableFeatures(pbmc), 10) 
+  pbmc <- ScaleData(pbmc, features =  rownames(pbmc)) 
+  pbmc <- ScaleData(pbmc, vars.to.regress = "percent.mt") 
+  pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+  print(pbmc[["pca"]], dims = 1:5, nfeatures = 5) 
+  VizDimLoadings(pbmc, dims = 1:2, reduction = "pca") 
+  DimHeatmap(pbmc, dims = 1, cells = 500, balanced = TRUE) 
+  DimHeatmap(pbmc, dims = 1:15, cells = 500, balanced = TRUE) 
+  pbmc <- JackStraw(pbmc, num.replicate = 100) 
+  pbmc <- ScoreJackStraw(pbmc, dims = 1:20) 
+  JackStrawPlot(pbmc, dims = 1:15)
+  pbmc <- FindNeighbors(pbmc, dims = 1:10)
+  pbmc <- FindClusters(pbmc, resolution = 0.5) 
+  head(Idents(pbmc), 5) 
+  pbmc <- RunUMAP(pbmc, dims = 1:10) 
+  pbmc <- RunTSNE(pbmc, dims = 1:10) 
+  DimPlot(pbmc, reduction = "umap", label = TRUE)
+  pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) 
+  library(dplyr)
+  pbmc.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC) 
+}
+
+
+library(dplyr)
+top10 <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(pbmc, features = top10$gene) + NoLegend()#展示前10个标记基因的热图
+VlnPlot(pbmc, features = top10$gene[1:20],pt.size=0)
+VlnPlot(pbmc, features = top10$gene[1:9],pt.size=0,ncol = 2)
+
+DimPlot(pbmc,label = T)
+
+#通过标记基因及文献，可以人工确定各分类群的细胞类型，则可以如下手动添加细胞群名称------------------------
+bfreaname.pbmc <- pbmc
+new.cluster.ids <- c("Naive CD4 T", "Memory CD4 T", "CD14+ Mono", "B", "CD8 T", "FCGR3A+ Mono", 
+                     "NK", "DC", "Platelet")
+#帮助单细胞测序进行注释的数据库：
+#http://mp.weixin.qq.com/s?__biz=MzI5MTcwNjA4NQ==&mid=2247502903&idx=2&sn=fd21e6e111f57a4a2b6c987e391068fd&chksm=ec0e09bddb7980abf038f62d03d3beea6249753c8fba69b69f399de9854fc208ca863ca5bc23&mpshare=1&scene=24&srcid=1110SJhxDL8hmNB5BThrgOS9&sharer_sharetime=1604979334616&sharer_shareid=853c5fb0f1636baa0a65973e8b5db684#rd
+#cellmarker: http://biocc.hrbmu.edu.cn/CellMarker/index.jsp
+names(new.cluster.ids) <- levels(pbmc)
+pbmc <- RenameIdents(pbmc, new.cluster.ids)
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+
+
+### 方法二：通过singleR进行注释 #### #这一方法很鸡肋，主要是由于很难找到合适的参考数据，但是对于免疫细胞的注释还是有可观效果的----------------------
+if(!require('SingleR'))BiocManager::install('SingleR')##具有内部参考数据集可以参考使用
+if(!require(matrixStats))BiocManager::install('matrixStats')
+if(!require(celldex))BiocManager::install('celldex')
+cg<-ImmGenData()#选取我们要使用的免疫细胞参考数据集   #参考数据集
+assay_for_SingleR <- GetAssayData(bfreaname.pbmc, slot="data")#取出样本中的表达序列
+predictions <- SingleR(test=assay_for_SingleR, 
+                       ref=cg, labels=cg$label.main)
+table(predictions$labels)#看看都注释到了哪些细胞
+cellType=data.frame(seurat=bfreaname.pbmc@meta.data$seurat_clusters,
+                    predict=predictions$labels)#得到seurat中编号与预测标签之间的关系
+sort(table(cellType[,1]))
+table(cellType[,1:2])#访问celltyple的2~3列
+
+#当你有合适的参考数据集时可以用方法三方法四进行注释
+#方法三：自定义singleR的注释----------------
+#我们走个极端，拿它自己作为自己的参考数据集，看看注释的准不准
+##########利用singleR构建自己的数据作为参考数据集########
+library(SingleR)
+library(Seurat)
+library(ggplot2)
+## Warning: package 'ggplot2' was built under R version 4.0.5
+if(!require(textshape))install.packages('textshape')
+## Loading required package: textshape
+## Warning: package 'textshape' was built under R version 4.0.5
+## 
+## Attaching package: 'textshape'
+## The following object is masked from 'package:dplyr':
+## 
+##     combine
+## The following object is masked from 'package:Biobase':
+## 
+##     combine
+## The following object is masked from 'package:BiocGenerics':
+## 
+##     combine
+if(!require(scater))BiocManager::install('scater')
+## Loading required package: scater
+## Warning: package 'scater' was built under R version 4.0.4
+## Loading required package: SingleCellExperiment
+if(!require(SingleCellExperiment))BiocManager::install('SingleCellExperiment')
+library(dplyr)
+
+# 读入scRNA数据 -------
+myref <- pbmc##这里为了检测，我们将参考数据集与目标数据集用同一个数据进行测试
+myref$celltype <- Idents(myref)
+table(Idents(myref))
+## 
+##  Naive CD4 T Memory CD4 T   CD14+ Mono            B        CD8 T FCGR3A+ Mono 
+##          709          480          429          342          316          162 
+##           NK           DC     Platelet 
+##          154           32           14
+# 读入参考数据集 -------
+Refassay <- log1p(AverageExpression(myref, verbose = FALSE)$RNA)#求
+#Ref <- textshape::column_to_rownames(Ref, loc = 1)#另一种得到参考矩阵的办法
+head(Refassay)#看看表达矩阵长啥样
+##               Naive CD4 T Memory CD4 T  CD14+ Mono          B      CD8 T
+## AL627309.1    0.006006857   0.04740195 0.006651185 0.00000000 0.01746659
+## AP006222.2    0.000000000   0.01082590 0.009196592 0.00000000 0.01016628
+## RP11-206L10.2 0.007300235   0.00000000 0.000000000 0.02055829 0.00000000
+## RP11-206L10.9 0.000000000   0.01044641 0.000000000 0.00000000 0.00000000
+## LINC00115     0.014803993   0.03685000 0.033640559 0.03836728 0.01657028
+## NOC2L         0.410974333   0.24101294 0.312227749 0.46371195 0.39676059
+##               FCGR3A+ Mono         NK        DC Platelet
+## AL627309.1      0.00000000 0.00000000 0.0000000        0
+## AP006222.2      0.00000000 0.00000000 0.0000000        0
+## RP11-206L10.2   0.00000000 0.00000000 0.0812375        0
+## RP11-206L10.9   0.01192865 0.00000000 0.0000000        0
+## LINC00115       0.01458683 0.05726061 0.0000000        0
+## NOC2L           0.40564359 0.53378022 0.2841343        0
+ref_sce <- SingleCellExperiment::SingleCellExperiment(assays=list(counts=Refassay))
+#参考数据集需要构建成一个SingleCellExperiment对象
+ref_sce=scater::logNormCounts(ref_sce)
+
+logcounts(ref_sce)[1:4,1:4]
+##               Naive CD4 T Memory CD4 T  CD14+ Mono          B
+## AL627309.1    0.009250892   0.06711500 0.009538416 0.00000000
+## AP006222.2    0.000000000   0.01560549 0.013172144 0.00000000
+## RP11-206L10.2 0.011235027   0.00000000 0.000000000 0.02967623
+## RP11-206L10.9 0.000000000   0.01506130 0.000000000 0.00000000
+colData(ref_sce)$Type=colnames(Refassay)
+ref_sce#构建完成
+## class: SingleCellExperiment 
+## dim: 13714 9 
+## metadata(0):
+## assays(2): counts logcounts
+## rownames(13714): AL627309.1 AP006222.2 ... PNRC2.1 SRSF10.1
+## rowData names(0):
+## colnames(9): Naive CD4 T Memory CD4 T ... DC Platelet
+## colData names(2): sizeFactor Type
+## reducedDimNames(0):
+## altExpNames(0):
+###提取自己的单细胞矩阵##########
+testdata <- GetAssayData(bfreaname.pbmc, slot="data")
+pred <- SingleR(test=testdata, ref=ref_sce, 
+                labels=ref_sce$Type,
+                #clusters = scRNA@active.ident
+)
+table(pred$labels)
+## 
+##            B   CD14+ Mono        CD8 T           DC FCGR3A+ Mono Memory CD4 T 
+##          344          537          308           31          179          464 
+##  Naive CD4 T           NK     Platelet 
+##          601          160           14
+head(pred) 
+## DataFrame with 6 rows and 5 columns
+##                                          scores first.labels      tuning.scores
+##                                        <matrix>  <character>        <DataFrame>
+## AAACATACAACCAC-1 0.336675:0.424807:0.430908:...        CD8 T 0.321456:0.2879031
+## AAACATTGAGCTAC-1 0.494458:0.381603:0.391545:...            B 0.494458:0.4012752
+## AAACATTGATCAGC-1 0.373678:0.519949:0.489834:...   CD14+ Mono 0.411459:0.3466608
+## AAACCGTGCTTCCG-1 0.341852:0.362193:0.353068:... Memory CD4 T 0.422782:0.3899934
+## AAACCGTGTATGCG-1 0.233921:0.279848:0.329152:...           NK 0.384988:0.0678734
+## AAACGCACTGGTAC-1 0.391590:0.458438:0.426201:...   CD14+ Mono 0.335794:0.2679515
+##                        labels pruned.labels
+##                   <character>   <character>
+## AAACATACAACCAC-1        CD8 T         CD8 T
+## AAACATTGAGCTAC-1            B             B
+## AAACATTGATCAGC-1   CD14+ Mono    CD14+ Mono
+## AAACCGTGCTTCCG-1 FCGR3A+ Mono  FCGR3A+ Mono
+## AAACCGTGTATGCG-1           NK            NK
+## AAACGCACTGGTAC-1   CD14+ Mono    CD14+ Mono
+as.data.frame(table(pred$labels))
+##           Var1 Freq
+## 1            B  344
+## 2   CD14+ Mono  537
+## 3        CD8 T  308
+## 4           DC   31
+## 5 FCGR3A+ Mono  179
+## 6 Memory CD4 T  464
+## 7  Naive CD4 T  601
+## 8           NK  160
+## 9     Platelet   14
+#pred@listData[["scores"]] #预测评分，想看看结构的可以自己看看
+#同上，我们找一下seurat中类群与注释结果直接的关系
+cellType=data.frame(seurat=bfreaname.pbmc@meta.data$seurat_clusters,
+                    predict=pred$labels)#得到seurat中编号与预测标签之间的关系
+sort(table(cellType[,1]))
+## 
+##   8   7   6   5   4   3   2   1   0 
+##  14  32 154 162 316 342 429 480 709
+table(cellType[,1:2])#访问celltyple的2~3列
+##       predict
+## seurat   B CD14+ Mono CD8 T  DC FCGR3A+ Mono Memory CD4 T Naive CD4 T  NK
+##      0   2        159    13   0            0            0         535   0
+##      1   0          0     0   1           17          462           0   0
+##      2   0        355    10   0            0            0          64   0
+##      3 341          1     0   0            0            0           0   0
+##      4   1         22   282   0            0            0           2   9
+##      5   0          0     0   0          162            0           0   0
+##      6   0          0     3   0            0            0           0 151
+##      7   0          0     0  30            0            2           0   0
+##      8   0          0     0   0            0            0           0   0
+##       predict
+## seurat Platelet
+##      0        0
+##      1        0
+##      2        0
+##      3        0
+##      4        0
+##      5        0
+##      6        0
+##      7        0
+##      8       14
+lalala <- as.data.frame(table(cellType[,1:2]))
+finalmap <- lalala %>% group_by(seurat) %>% top_n(n = 1, wt = Freq)#找出每种seurat_cluster注释比例最高的对应类型
+finalmap <-finalmap[order(finalmap$seurat),]$predict#找到seurat中0：8的对应预测细胞类型
+print(finalmap)
+## [1] Naive CD4 T  Memory CD4 T CD14+ Mono   B            CD8 T       
+## [6] FCGR3A+ Mono NK           DC           Platelet    
+## 9 Levels: B CD14+ Mono CD8 T DC FCGR3A+ Mono Memory CD4 T Naive CD4 T ... Platelet
+testname <- bfreaname.pbmc
+new.cluster.ids <- as.character(finalmap)
+names(new.cluster.ids) <- levels(testname)
+testname <- RenameIdents(testname, new.cluster.ids)
+
+p1 <- DimPlot(pbmc,label = T)
+p2 <- DimPlot(testname,label = T)#比较一下测试数据与参考数据集之间有没有偏差
+p1|p2#完美，无差别注释，当然了，我们这个参考数据用的比较极端
+
+
+
+######利用seurat内置的原先用于细胞整合的功能，将参考数据与待注释数据进行映射处理(方法4)-----------------
+library(Seurat)
+pancreas.query <- bfreaname.pbmc#待注释数据
+pancreas.anchors <- FindTransferAnchors(reference = pbmc, query = pancreas.query,
+                                        dims = 1:30)
+pbmc$celltype <- Idents(pbmc)
+predictions <- TransferData(anchorset = pancreas.anchors, refdata = pbmc$celltype,
+                            dims = 1:30)
+pancreas.query <- AddMetaData(pancreas.query, metadata = predictions)
+#把注释加回原来的数据集
+pancreas.query$prediction.match <- pancreas.query$predicted.id
+table(pancreas.query$prediction.match)
+Idents(pancreas.query)<- 'prediction.match'
+
+p1 <- DimPlot(pbmc,label = T)
+p2 <- DimPlot(pancreas.query,label = T)#比较一下测试数据与参考数据集之间有没有偏差
+p1|p2#完美，无差别注释，当然了，我们这个参考数据用的比较极端
+
+
+#### 最近发现代码运行的最大障碍是各个packages的版本冲突问题，这里列出本次分析环境中的所有信息，报错时可以参考
+sessionInfo()
