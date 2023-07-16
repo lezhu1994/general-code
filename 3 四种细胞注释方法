@@ -1,4 +1,4 @@
-if(T){rm(list = ls())
+rm(list = ls())
   if (!require("Seurat"))install.packages("Seurat")
   if (!require("BiocManager", quietly = TRUE))install.packages("BiocManager")
   if (!require("multtest", quietly = TRUE))install.packages("multtest")
@@ -33,7 +33,7 @@ if(T){rm(list = ls())
   pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) 
   library(dplyr)
   pbmc.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC) 
-}
+
 
 
 library(dplyr)
