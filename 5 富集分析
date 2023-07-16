@@ -1,0 +1,149 @@
+suppressWarnings(suppressMessages(if(!require(rvcheck))devtools::install_version("rvcheck", version = "0.1.8", repos = "http://cran.us.r-project.org")))
+suppressWarnings(suppressMessages(if(!require(clusterProfiler))BiocManager::install("clusterProfiler")))
+suppressWarnings(suppressMessages(if(!require(org.Mm.eg.db))BiocManager::install("org.Mm.eg.db")))
+suppressWarnings(suppressMessages(if(!require(org.Hs.eg.db))BiocManager::install("org.Hs.eg.db")))
+suppressWarnings(suppressMessages(library(dplyr)))
+准备基因和绘图函数
+bcell.marker <- read.csv('bcell.marker.CSV',row.names = 1)
+head(bcell.marker)
+##             p_val avg_log2FC pct.1 pct.2    p_val_adj SYMBOL
+## GZMB 3.186146e-97  -5.507567 0.017 0.961 4.369480e-93   GZMB
+## NKG7 1.262672e-94  -6.262287 0.087 1.000 1.731628e-90   NKG7
+## PRF1 1.835435e-93  -4.612813 0.029 0.948 2.517115e-89   PRF1
+## GZMA 3.036581e-93  -4.466820 0.015 0.929 4.164367e-89   GZMA
+## CTSW 3.151498e-93  -4.203776 0.070 0.987 4.321965e-89   CTSW
+## CST7 9.767143e-92  -4.380031 0.038 0.948 1.339466e-87   CST7
+mygene <- bcell.marker %>% top_n(n = -100, wt = p_val_adj) %>% rownames()
+mygene[1:10]
+##  [1] "GZMB"   "NKG7"   "PRF1"   "GZMA"   "CTSW"   "CST7"   "GNLY"   "FGFBP2"
+##  [9] "CD247"  "FCGR3A"
+gene.df <- bitr(mygene,fromType="SYMBOL",toType=c("ENTREZID","ENSEMBL"),
+                OrgDb = org.Hs.eg.db)
+## 'select()' returned 1:many mapping between keys and columns
+## Warning in bitr(mygene, fromType = "SYMBOL", toType = c("ENTREZID",
+## "ENSEMBL"), : 1% of input gene IDs are fail to map...
+erich2plot <- function(data4plot){
+  library(ggplot2)
+  data4plot <- data4plot[order(data4plot$qvalue,decreasing = F)[1:20],]
+  data4plot$BgRatio<-
+    apply(data4plot,1,function(x){
+      as.numeric(strsplit(x[3],'/')[[1]][1])
+    })/apply(data4plot,1,function(x){
+      as.numeric(strsplit(x[4],'/')[[1]][1])
+    })
+  
+  p <- ggplot(data4plot,aes(BgRatio,Description))
+  p<-p + geom_point()
+  
+  pbubble <- p + geom_point(aes(size=Count,color=-1*log10(qvalue)))
+  
+  pr <- pbubble + scale_colour_gradient(low="#90EE90",high="red") + 
+    labs(color=expression(-log[10](qvalue)),size="observed.gene.count", 
+         x="Richfactor", y="term.description",title="Enrichment Process")
+  
+  pr <- pr + theme_bw()
+  pr
+}
+KEGG 与 GO 富集分析
+#使用在线数据,可能会受域名限制
+ekegg <- enrichKEGG(unique(gene.df$ENTREZID), organism='hsa',
+                    pvalueCutoff=0.05,pAdjustMethod='BH',qvalueCutoff=0.2,
+                    minGSSize=10,maxGSSize=500,use_internal_data=F)
+## Reading KEGG annotation online:
+## 
+## Reading KEGG annotation online:
+ekegg <- setReadable(ekegg,'org.Hs.eg.db','ENTREZID')
+write.csv(ekegg@result,'kegg.result.csv')
+
+erich2plot(ekegg@result)
+## Warning: package 'ggplot2' was built under R version 4.0.5
+
+
+pdf(file = 'kegg.pdf',width = 10,height = 10)
+erich2plot(ekegg@result)
+dev.off()
+## png 
+##   2
+#######GO over-representation test###########
+ggoMF <- enrichGO(gene.df$SYMBOL, org.Hs.eg.db, keyType = "SYMBOL", ont = "MF",
+                  pvalueCutoff = 0.05, pAdjustMethod = "BH", qvalueCutoff = 0.2, minGSSize = 10,
+                  maxGSSize = 500, readable = FALSE, pool = FALSE)
+write.csv(ggoMF@result,'GO.MF.result.csv')
+
+pdf(file = 'GO.MF.pdf',width = 10,height = 10)
+erich2plot(ggoMF@result)
+dev.off()
+## png 
+##   2
+ggoCC <- enrichGO(gene.df$SYMBOL, org.Hs.eg.db, keyType = "SYMBOL", ont = "CC",
+                  pvalueCutoff = 0.05, pAdjustMethod = "BH", qvalueCutoff = 0.2, minGSSize = 10,
+                  maxGSSize = 500, readable = FALSE, pool = FALSE)
+write.csv(ggoCC@result,'GO.CC.result.csv')
+
+pdf(file = 'ggoCC.pdf',width = 10,height = 10)
+erich2plot(ggoCC@result)
+dev.off()
+## png 
+##   2
+ggoBP <- enrichGO(gene.df$SYMBOL, org.Hs.eg.db, keyType = "SYMBOL", ont = "BP",
+                  pvalueCutoff = 0.05, pAdjustMethod = "BH", qvalueCutoff = 0.2, minGSSize = 10,
+                  maxGSSize = 500, readable = FALSE, pool = FALSE)
+write.csv(ggoBP@result,'GO.BP.result.csv')
+
+pdf(file = 'ggoBP.pdf',width = 10,height = 10)
+erich2plot(ggoBP@result)
+dev.off()
+## png 
+##   2
+GSEA 分析
+bcell.marker$SYMBOL <- rownames(bcell.marker)
+genetable <- merge(gene.df,bcell.marker,by='SYMBOL')  
+geneList <- genetable$avg_log2FC
+names(geneList) <- genetable$ENTREZID
+
+geneList <- sort(geneList,decreasing = T)
+egseGO <- gseGO(geneList,ont = "MF", org.Hs.eg.db, exponent = 1, nPerm = 1000, 
+                minGSSize = 10, maxGSSize = 500, pvalueCutoff = 1, pAdjustMethod = "BH", 
+                verbose = TRUE, seed = FALSE, by = "fgsea")#换成CC   BP
+## preparing geneSet collections...
+## GSEA analysis...
+## Warning in .GSEA(geneList = geneList, exponent = exponent, minGSSize =
+## minGSSize, : We do not recommend using nPerm parameter incurrent and future
+## releases
+## Warning in fgsea(pathways = geneSets, stats = geneList, nperm = nPerm, minSize
+## = minGSSize, : You are trying to run fgseaSimple. It is recommended to use
+## fgseaMultilevel. To run fgseaMultilevel, you need to remove the nperm argument
+## in the fgsea function call.
+## Warning in preparePathwaysAndStats(pathways, stats, minSize, maxSize, gseaParam, : There are ties in the preranked stats (46.49% of the list).
+## The order of those tied genes will be arbitrary, which may produce unexpected results.
+## Warning in preparePathwaysAndStats(pathways, stats, minSize, maxSize,
+## gseaParam, : There are duplicate gene names, fgsea may produce unexpected
+## results.
+## leading edge analysis...
+## done...
+kk2 <- gseKEGG(geneList=geneList,
+               organism = "hsa",#hsa => human   , mmu => mouse #可用物种列表：   
+               #https://www.genome.jp/kegg/catalog/org_list.html
+               nPerm=1000,
+               minGSSize = 120,
+               pvalueCutoff = 1,
+               verbose = FALSE)
+## Warning in .GSEA(geneList = geneList, exponent = exponent, minGSSize =
+## minGSSize, : We do not recommend using nPerm parameter incurrent and future
+## releases
+## Warning in fgsea(pathways = geneSets, stats = geneList, nperm = nPerm, minSize
+## = minGSSize, : You are trying to run fgseaSimple. It is recommended to use
+## fgseaMultilevel. To run fgseaMultilevel, you need to remove the nperm argument
+## in the fgsea function call.
+## Warning in preparePathwaysAndStats(pathways, stats, minSize, maxSize, gseaParam, : There are ties in the preranked stats (46.49% of the list).
+## The order of those tied genes will be arbitrary, which may produce unexpected results.
+## Warning in preparePathwaysAndStats(pathways, stats, minSize, maxSize,
+## gseaParam, : There are duplicate gene names, fgsea may produce unexpected
+## results.
+## no term enriched under specific pvalueCutoff...
+for (i in 1:length(egseGO$Description)) {
+  plot1 <- gseaplot(egseGO,geneSetID = i,title = egseGO$Description[i])
+  ggsave( paste0(egseGO$Description[i],".pdf"),plot = plot1,height = 10,width = 10)
+}
+
+plot1
