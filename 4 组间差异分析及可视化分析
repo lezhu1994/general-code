@@ -1,0 +1,130 @@
+library(Seurat)
+## Attaching SeuratObject
+library(dplyr)
+## 
+## 载入程辑包：'dplyr'
+## The following objects are masked from 'package:stats':
+## 
+##     filter, lag
+## The following objects are masked from 'package:base':
+## 
+##     intersect, setdiff, setequal, union
+pbmc <- readRDS('pbmcrenamed.rds')
+pbmc
+## An object of class Seurat 
+## 22254 features across 900 samples within 2 assays 
+## Active assay: RNA (20254 features, 0 variable features)
+##  1 other assay present: integrated
+##  3 dimensional reductions calculated: pca, umap, tsne
+DimPlot(pbmc)
+
+
+names(pbmc@meta.data)
+## [1] "orig.ident"               "nCount_RNA"              
+## [3] "nFeature_RNA"             "percent.mt"              
+## [5] "group"                    "integrated_snn_res.0.025"
+## [7] "seurat_clusters"          "celltype.group"          
+## [9] "celltype"
+unique(pbmc$group)
+## [1] "C57" "AS1" "P3"
+DimPlot(pbmc,split.by = 'group')
+
+
+#差异分析
+pbmc$celltype.group <- paste(pbmc$celltype, pbmc$group, sep = "_")#细胞标记和组名合并——
+pbmc$celltype <- Idents(pbmc)
+Idents(pbmc) <- "celltype.group"
+
+mydeg <- FindMarkers(pbmc,ident.1 = 'EC_AS1',ident.2 = 'EC_P3', verbose = FALSE, test.use = 'wilcox',min.pct = 0.1)
+head(mydeg,10)
+##               p_val avg_log2FC pct.1 pct.2  p_val_adj
+## Cd24a  6.327111e-07  1.4046048 0.500 0.016 0.01281493
+## Spta1  9.387127e-07  0.3391453 0.375 0.000 0.01901269
+## Lum    9.387127e-07  3.8953383 0.375 0.000 0.01901269
+## Gda    9.387127e-07  0.6064680 0.375 0.000 0.01901269
+## Isg20  6.651476e-06  1.4016408 0.500 0.032 0.13471900
+## Hbb-bt 7.937909e-06  4.3779094 0.500 0.032 0.16077441
+#解放生产力 通过循环自动计算差异基因
+cellfordeg<-levels(pbmc$celltype)
+for(i in 1:length(cellfordeg)){
+  CELLDEG <- FindMarkers(pbmc, ident.1 = paste0(cellfordeg[i],"_P3"), ident.2 = paste0(cellfordeg[i],"_AS1"), verbose = FALSE)
+  write.csv(CELLDEG,paste0(cellfordeg[i],".CSV"))
+}
+list.files()
+##  [1] "B cell.CSV"                 "EC.CSV"                    
+##  [3] "Fibro.CSV"                  "Macro.CSV"                 
+##  [5] "Mono.CSV"                   "Myeloid cells.CSV"         
+##  [7] "Neut.CSV"                   "pbmcrenamed.rds"           
+##  [9] "T cell.CSV"                 "VSMC.CSV"                  
+## [11] "组间差异分析及可视化.html"  "组间差异分析及可视化.Rmd"  
+## [13] "组间差异分析及可视化_files" "组间差异及可视化.r"
+#可视化方法
+library(dplyr)
+top10 <- CELLDEG  %>% top_n(n = 10, wt = avg_log2FC) %>% row.names() ##管道函数越取越小
+top10
+##  [1] "Thbs1"    "Acta2"    "Myl9"     "Tagln"    "Ccn2"     "Plvap"   
+##  [7] "Igfbp7"   "Ifi27l2a" "Dcn"      "Gdf15"
+pbmc <- ScaleData(pbmc, features =  rownames(pbmc)) 
+## Centering and scaling data matrix
+DoHeatmap(pbmc,features = top10,size=3)
+
+
+Idents(pbmc) <- "celltype"
+VlnPlot(pbmc,features = top10,split.by = 'group',idents = 'EC')
+## The default behaviour of split.by has changed.
+## Separate violin plots are now plotted side-by-side.
+## To restore the old behaviour of a single split violin,
+## set split.plot = TRUE.
+##       
+## This message will be shown once per session.
+
+
+FeaturePlot(pbmc,features = top10,split.by = 'group')
+
+
+#DotPlot(pbmc,features = top10,split.by ='group')#默认只有两种颜色
+DotPlot(pbmc,features = top10,split.by ='group',cols = c('blue','yellow','pink'))
+
+
+#提取表达量，用ggplot2 DIY一个箱线图
+####提取表达量#######
+mymatrix <- as.data.frame(pbmc@assays$RNA@data)
+mymatrix2<-t(mymatrix)%>%as.data.frame()
+mymatrix2[,1]<-pbmc$celltype
+colnames(mymatrix2)[1] <- "celltype"
+
+mymatrix2[,ncol(mymatrix2)+1]<-pbmc$group
+colnames(mymatrix2)[ncol(mymatrix2)] <- "group"
+
+#绘图
+library(ggplot2)
+p1<- ggplot2::ggplot(mymatrix2,aes(x=celltype,y=Thbs1,fill=group))+
+  geom_boxplot(alpha=0.7)+
+  scale_y_continuous(name = "Expression")+
+  scale_x_discrete(name="Celltype")+
+  scale_fill_manual(values = c('DeepSkyBlue','Orange','pink'))
+p1
+
+
+#########另一种提取方法########
+Idents(pbmc) <- colnames(pbmc)
+mymatrix <- log1p(AverageExpression(pbmc, verbose = FALSE)$RNA)
+mymatrix2<-t(mymatrix)%>%as.data.frame()
+mymatrix2[,1]<-pbmc$celltype
+colnames(mymatrix2)[1] <- "celltype"
+
+mymatrix2[,ncol(mymatrix2)+1]<-pbmc$group
+colnames(mymatrix2)[ncol(mymatrix2)] <- "group"
+
+library(ggplot2)
+p2<- ggplot2::ggplot(mymatrix2,aes(x=celltype,y=Thbs1,fill=group))+
+  geom_boxplot(alpha=0.7)+
+  scale_y_continuous(name = "Expression")+
+  scale_x_discrete(name="Celltype")+
+  scale_fill_manual(values = c('DeepSkyBlue','Orange','pink'))
+p2
+
+
+###比较一下两种方法，发现并没有差异
+library(patchwork)
+p1|p2
